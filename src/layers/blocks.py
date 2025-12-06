@@ -135,4 +135,182 @@ class TransformerBlock(nn.Module):
 
     return final_output
 
+class PatchEmbedding(nn.Module):
+  '''
+  Converts input images into patch embeddings
+  Input : (batch_size, in_channels, in_height, in_width)
+  Output: (batch_size, n_patches + 1, embed_dim)
 
+  pos_embed: Positional embeddings to retain spatial information.
+  cls_token: Classification token to aggregate information for classification.
+
+  It is useful to note that, positional embeddings are ADDED to the patch embeddings.
+  But, cls_token is CONCATENATED to the patch embeddings.
+
+  Note the difference between adding and concatenating.
+
+  It is similar to tokenization but for images.
+  '''
+  def __init__(self, config):
+
+    super().__init__()
+
+    self.patch_size = config['patch_size']
+    self.in_width = config['img_size']
+    self.in_height = config['img_size']
+    self.in_channels = config['in_channels']
+    self.embed_dim = config['embed_dim']
+
+    self.n_patch_along_width = self.in_width // self.patch_size
+    self.n_patch_along_height = self.in_height // self.patch_size
+
+    self.n_patches = self.n_patch_along_height * self.n_patch_along_width
+
+    self.projection = nn.Conv2d(in_channels = self.in_channels,
+                                out_channels= self.embed_dim,
+                                kernel_size = self.patch_size,
+                                stride = self.patch_size,
+                                )
+
+    # Classification token which will be learned to match the language associations
+    self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+
+    # Positional embeddings
+    self.pos_embed = nn.Parameter(torch.randn(1, self.n_patches + 1, self.embed_dim))
+
+  def forward(self, x):
+
+    # print(f'ImageToEmbedding : || Image received: {x.shape} ||')
+
+    # x shape: (Batch, 3, 224, 224)
+    x = self.projection(x)
+    # x shape: (Batch, 768, 14, 14)
+
+    # We need to convert it to (Batch, 14x14 = 196, 768)
+    x = x.flatten(2)
+    x = x.transpose(-1, -2)
+
+    # Expand and integrate cls token
+    B = x.shape[0]
+    cls_token = self.cls_token.expand(B, -1, -1)
+
+    # print(f'Cls_token: {cls_token.shape}, x: {x.shape}')
+    x = torch.cat((cls_token, x), dim = 1)
+
+    # Expand and integrate positional embeddings
+    pos_embeddings = self.pos_embed.expand(B, -1, -1)
+    # print(f'pos_embeddingg: {pos_embeddings.shape}, X : {x.shape}')
+    x = x + pos_embeddings
+
+    # print(f'ImageToEmbedding: ||Image processed into : {x.shape} ||')
+
+    return x
+
+class InputImageEncoder(nn.Module):
+  '''
+  self.forward :
+  Input Image ---> ImageEmbedding ---> TransformerBlock ---> LayerNorm ---> Learnt [CLS] Embedding
+                                                                      |
+                                                                      ---> Image Class Probabilities
+  Given a batch of images, it generates image embeddings and processes the
+    patches (image tokens) through transformer blocks
+      to finally generate encoded representations.
+
+  It handles following nuances:
+
+  1. Sequential pass-through on transfomer blocks
+  2. layer normalization on block output
+  3. It has a head which can convert [CLS] token to class probabilities
+  4. When the global representation of whole image is required, values learnt at [CLS] token is considered as output
+
+  DEPENDENCIES
+
+  1. ImageToEmbedding
+  2. TransformerBlock
+
+  # Hence, called ImageEncoder.
+
+  '''
+
+  def __init__(self, venc_config, patch_config, trans_config):
+
+    super().__init__()
+
+    self.venc_config = venc_config
+    self.patch_config = patch_config
+    self.trans_config = trans_config
+
+    self.depth = self.venc_config['depth']
+    self.image_to_embedding = PatchEmbedding(self.patch_config)
+
+    # self.trans_config['seq_len'] = self.image_to_embedding.n_patches + 1
+    # print(f'seq_len : {self.trans_config['seq_len']}')
+
+    self.transformer_blocks = [TransformerBlock(self.trans_config) for _ in range(self.depth)]
+
+    self.blocks = nn.Sequential(*[self.image_to_embedding, *self.transformer_blocks])
+
+    self.layer_norm = nn.LayerNorm(self.venc_config['embed_dim'])
+    self.head = nn.Linear(self.venc_config['embed_dim'], self.venc_config['n_classes'])
+
+
+  def forward(self, x):
+    # x is image of shape b, c, w, h
+    x = self.blocks(x)
+
+    # x is of shape b, n_patches + 1, embed_dim (one patch is classification token)
+    x = self.layer_norm(x)
+
+    # If we only want to output the learnt [CLS] embeddings itself
+    output = x[:, 0, :]
+
+    # If we want to classify image based on [CLS] token
+    # output_cls_vector = x[:, 0, :]
+    # output = self.head(output_cls_vector)
+
+    return output
+
+class InputTextEncoder(nn.Module):
+
+  def __init__(self, config):
+    super().__init__()
+
+    # Vocabulary building 
+    self.pad_token = '[PAD]'
+    self.eos_token = '[EOS]'
+    self.unknown_token = '[UNK]'
+    self.word_to_id = None
+
+    # Embeddings building
+    self.embedding = nn.Embedding(num_embeddings=config['vocab-size'], embedding_dim=config['embed_dim'])
+    self.pose_embed = nn.Parameter(torch.randn(1, self.config['max_len'], self.config['embed_dim']))
+  
+  def fit_tokenizer(self, data):
+    
+    words = []
+
+    for sentence in data:
+      word_list = sentence.split()
+      for word in word_list:
+        words.append(word)
+    
+    unique_words = set(words)
+    sorted_words = sorted(unique_words)
+
+    vocab = [self.pad_token, self.eos_token, self.unknown_token] + sorted_words
+    token_with_ids = dict()
+    for id, token in enumerate(vocab):
+      token_with_ids[token] = id
+    
+    self.word_to_id = token_with_ids
+  
+  def forward(self, sentence):
+
+    words = sentence.split()
+    token_sequence = []
+    for word in words:
+      try:
+        token_sequence.append(self.word_to_id[word])
+      except:
+        token_sequence.append(self.word_to_id[self.unknown_token])
+        print(f"Word ['{word}'] not found in vocabulary.")
