@@ -19,6 +19,14 @@ class VEncoderConfig:
     depth: int = 12
     n_classes: int = 1000
 
+@dataclass
+class TextEncoderConfig:
+    max_len: int = 100
+    embed_dim: int = 768
+    vocab_size: int = 20
+    
+    
+
 
 
 
