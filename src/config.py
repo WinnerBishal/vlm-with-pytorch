@@ -20,10 +20,17 @@ class VEncoderConfig:
     n_classes: int = 1000
 
 @dataclass
+class TokenizerConfig:
+    max_len: int = 100          # maximum tokens per sentence to process
+    pad_token: str = '[PAD]'
+    eos_token: str = '[EOS]'
+    unknown_token: str = '[UNK]'
+
+@dataclass
 class TextEncoderConfig:
-    max_len: int = 100
-    embed_dim: int = 768
-    vocab_size: int = 20
+    embed_dim: int = 768        # embedding vector length
+    depth: int = 12             # no. of transformer blokcs to stack
+    vocab_size: int = 309       # total no. of tokens to learn from the training data, should update after running tokenizer for once
     
     
 
